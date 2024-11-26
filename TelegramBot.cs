@@ -15,6 +15,10 @@ namespace ServerActivityMonitor
         private readonly ITelegramBotClient _botClient;
         // Монитор системных ресурсов
         private readonly ServerMonitor _monitor;
+        // Таймер для периодических проверок
+        private Timer? _monitoringTimer;
+        // Список чатов для уведомлений
+        private readonly HashSet<long> _subscribedChats;
 
         /// <summary>
         /// Конструктор класса TelegramBot
@@ -24,6 +28,7 @@ namespace ServerActivityMonitor
         {
             _botClient = new TelegramBotClient(token);
             _monitor = new ServerMonitor();
+            _subscribedChats = new HashSet<long>();
         }
 
         /// <summary>
@@ -33,14 +38,12 @@ namespace ServerActivityMonitor
         {
             var cts = new CancellationTokenSource();
             
-            // Настройка параметров получения обновлений
             var receiverOptions = new ReceiverOptions
             {
-                AllowedUpdates = Array.Empty<UpdateType>(), // Принимаем все типы обновлений
-                ThrowPendingUpdates = true // Пропускаем старые обновления при запуске
+                AllowedUpdates = Array.Empty<UpdateType>(),
+                ThrowPendingUpdates = true
             };
 
-            // Запуск получения обновлений
             _botClient.StartReceiving(
                 updateHandler: HandleUpdateAsync,
                 pollingErrorHandler: HandlePollingErrorAsync,
@@ -48,106 +51,188 @@ namespace ServerActivityMonitor
                 cancellationToken: cts.Token
             );
 
-            // Получение и вывод информации о боте
+            // Запускаем таймер для мониторинга
+            _monitoringTimer = new Timer(CheckSystemStatus, null, TimeSpan.Zero, TimeSpan.FromMinutes(5));
+
             var me = await _botClient.GetMeAsync();
             Console.WriteLine($"Bot started successfully. @{me.Username}");
         }
 
         /// <summary>
-        /// Обработчик входящих сообщений
+        /// Периодическая проверка состояния системы
         /// </summary>
+        private async void CheckSystemStatus(object? state)
+        {
+            if (_subscribedChats.Count == 0) return;
+
+            var alerts = new List<string>();
+
+            // Проверяем CPU
+            if (_monitor.MonitorCpuUsage(out double cpuUsage))
+            {
+                alerts.Add($"⚠️ High CPU usage: {cpuUsage:0.00}%");
+            }
+
+            // Проверяем память
+            if (_monitor.MonitorMemoryUsage(out double memoryUsage))
+            {
+                alerts.Add($"⚠️ High memory usage: {memoryUsage:0.00}%");
+            }
+
+            // Проверяем диски
+            if (_monitor.MonitorDiskSpace())
+            {
+                alerts.Add("⚠️ Low disk space on one or more drives");
+            }
+
+            // Отправляем уведомления, если есть
+            if (alerts.Count > 0)
+            {
+                var message = "🚨 System Alert 🚨\n" + string.Join("\n", alerts);
+                foreach (var chatId in _subscribedChats)
+                {
+                    try
+                    {
+                        await _botClient.SendTextMessageAsync(chatId, message);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error sending alert to {chatId}: {ex.Message}");
+                    }
+                }
+            }
+        }
+
         private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
         {
             try
             {
-                // Проверяем, что получили текстовое сообщение
                 if (update.Message is not { } message)
                     return;
                 if (message.Text is not { } messageText)
                     return;
 
                 var chatId = message.Chat.Id;
-                Console.WriteLine($"Received message: {messageText}");
+                Console.WriteLine($"Получено сообщение: {messageText}");
 
-                // Обработка команд, начинающихся с '/'
-                if (messageText.StartsWith("/"))
-                {
-                    await HandleCommand(chatId, messageText, cancellationToken);
-                }
-                else
-                {
-                    // Ответ на обычные сообщения
-                    await _botClient.SendTextMessageAsync(
-                        chatId: chatId,
-                        text: "Use /start to see available commands",
-                        cancellationToken: cancellationToken);
-                }
+                var command = messageText.Split(' ')[0].ToLower();
+                await HandleCommand(chatId, command, cancellationToken);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error handling update: {ex.Message}");
+                Console.WriteLine($"Ошибка обработки сообщения: {ex.Message}");
             }
         }
 
-        /// <summary>
-        /// Обработчик команд бота
-        /// </summary>
         private async Task HandleCommand(long chatId, string command, CancellationToken cancellationToken)
         {
-            switch (command.ToLower())
+            switch (command)
             {
                 case "/start":
-                    // Отправка приветственного сообщения и списка команд
                     await _botClient.SendTextMessageAsync(
                         chatId: chatId,
-                        text: "Welcome to Server Monitor Bot!\n" +
-                              "Available commands:\n" +
-                              "/start - Show this help message\n" +
-                              "/status - Show server status",
+                        text: "Добро пожаловать в Server Monitor Bot!\n" +
+                              "Доступные команды:\n" +
+                              "/start - Показать это сообщение\n" +
+                              "/status - Показать состояние сервера\n" +
+                              "/disk - Показать информацию о дисках\n" +
+                              "/processes - Показать топ процессов\n" +
+                              "/network - Показать сетевую статистику\n" +
+                              "/subscribe - Включить уведомления\n" +
+                              "/unsubscribe - Отключить уведомления",
                         cancellationToken: cancellationToken);
                     break;
 
                 case "/status":
-                    // Получение и отправка информации о состоянии сервера
-                    var status = GetServerStatus();
+                    _monitor.MonitorCpuUsage(out double cpu);
+                    _monitor.MonitorMemoryUsage(out double mem);
                     await _botClient.SendTextMessageAsync(
                         chatId: chatId,
-                        text: status,
+                        text: $"💻 Состояние системы:\n" +
+                              $"Загрузка ЦП: {cpu:0.00}%\n" +
+                              $"Использование памяти: {mem:0.00}%",
                         cancellationToken: cancellationToken);
                     break;
 
-                default:
-                    // Ответ на неизвестную команду
+                case "/disk":
+                    var diskOutput = new StringWriter();
+                    var diskConsole = Console.Out;
+                    Console.SetOut(diskOutput);
+                    _monitor.MonitorDiskSpace();
+                    Console.SetOut(diskConsole);
                     await _botClient.SendTextMessageAsync(
                         chatId: chatId,
-                        text: "Unknown command. Use /start to see available commands.",
+                        text: $"💾 Информация о дисках:\n{diskOutput}",
+                        cancellationToken: cancellationToken);
+                    break;
+
+                case "/processes":
+                    var processOutput = new StringWriter();
+                    var processConsole = Console.Out;
+                    Console.SetOut(processOutput);
+                    _monitor.MonitorTopProcesses();
+                    Console.SetOut(processConsole);
+                    await _botClient.SendTextMessageAsync(
+                        chatId: chatId,
+                        text: $"⚙️ Топ процессов:\n{processOutput}",
+                        cancellationToken: cancellationToken);
+                    break;
+
+                case "/network":
+                    var networkOutput = new StringWriter();
+                    var networkConsole = Console.Out;
+                    Console.SetOut(networkOutput);
+                    _monitor.MonitorNetworkActivity();
+                    Console.SetOut(networkConsole);
+                    await _botClient.SendTextMessageAsync(
+                        chatId: chatId,
+                        text: $"🌐 Сетевая активность:\n{networkOutput}",
+                        cancellationToken: cancellationToken);
+                    break;
+
+                case "/subscribe":
+                    if (_subscribedChats.Add(chatId))
+                    {
+                        await _botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: "✅ Вы подписались на уведомления. Вы будете получать оповещения, когда системные ресурсы превысят пороговые значения.",
+                            cancellationToken: cancellationToken);
+                    }
+                    else
+                    {
+                        await _botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: "Вы уже подписаны на уведомления.",
+                            cancellationToken: cancellationToken);
+                    }
+                    break;
+
+                case "/unsubscribe":
+                    if (_subscribedChats.Remove(chatId))
+                    {
+                        await _botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: "❌ Вы отписались от уведомлений.",
+                            cancellationToken: cancellationToken);
+                    }
+                    else
+                    {
+                        await _botClient.SendTextMessageAsync(
+                            chatId: chatId,
+                            text: "Вы не подписаны на уведомления.",
+                            cancellationToken: cancellationToken);
+                    }
+                    break;
+
+                default:
+                    await _botClient.SendTextMessageAsync(
+                        chatId: chatId,
+                        text: "Неизвестная команда. Используйте /start для просмотра доступных команд.",
                         cancellationToken: cancellationToken);
                     break;
             }
         }
 
-        /// <summary>
-        /// Получение информации о состоянии сервера
-        /// </summary>
-        private string GetServerStatus()
-        {
-            // Перенаправляем вывод консоли в строку
-            var output = new StringWriter();
-            var console = Console.Out;
-            Console.SetOut(output);
-
-            // Получаем информацию о CPU и памяти
-            _monitor.MonitorCpuUsage();
-            _monitor.MonitorMemoryUsage();
-
-            // Восстанавливаем вывод консоли и возвращаем результат
-            Console.SetOut(console);
-            return output.ToString();
-        }
-
-        /// <summary>
-        /// Обработчик ошибок при получении обновлений
-        /// </summary>
         private Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
         {
             var errorMessage = exception switch
