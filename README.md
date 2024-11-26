@@ -1,30 +1,46 @@
-# Server Activity Monitor
+# Server Activity Monitor Bot
 
-A cross-platform .NET application for monitoring server resources including CPU usage and memory consumption.
+A Telegram bot for monitoring server resources and system status, built with .NET 8.0.
 
 ## Features
 
-- Real-time CPU usage monitoring
-- Memory usage tracking (Working Set, Virtual Memory, Private Memory)
-- Cross-platform support (Windows and Linux)
+- CPU usage monitoring
+- Memory usage monitoring
+- Real-time system status updates
+- Simple command interface
+
+## Commands
+
+- `/start` - Show welcome message and available commands
+- `/status` - Display current server status (CPU and memory usage)
 
 ## Requirements
 
-- .NET 8.0 or higher
+- .NET 8.0 SDK
+- Windows OS (for PerformanceCounter functionality)
+- Telegram Bot Token
 
-## How to Run
+## Setup
 
 1. Clone the repository
-2. Navigate to the project directory
-3. Run the application:
+2. Update the bot token in `Program.cs`
+3. Build and run:
 ```bash
+dotnet restore
+dotnet build
 dotnet run
 ```
 
-## Output Example
+## Dependencies
 
-The application will display:
-- Current CPU usage percentage
-- Process Working Set (Memory) in MB
-- Process Virtual Memory in MB
-- Process Private Memory in MB
+- Telegram.Bot (19.0.0)
+- System.Diagnostics.PerformanceCounter (8.0.0)
+- Microsoft.VisualBasic (10.3.0)
+
+## Future Improvements
+
+- Disk space monitoring
+- Process list monitoring
+- System uptime information
+- Network statistics
+- Resource usage alerts

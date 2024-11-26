@@ -1,332 +1,164 @@
-using System;
-using System.Collections.Concurrent;
-using System.Threading;
-using System.Threading.Tasks;
 using Telegram.Bot;
 using Telegram.Bot.Types;
-using Telegram.Bot.Types.ReplyMarkups;
+using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
 
 namespace ServerActivityMonitor
 {
+    /// <summary>
+    /// Основной класс для работы с Telegram ботом
+    /// </summary>
     public class TelegramBot
     {
+        // Клиент Telegram Bot API
         private readonly ITelegramBotClient _botClient;
-        private readonly ConcurrentDictionary<long, ServerCredentials> _serverCredentials;
-        private readonly ServerMonitor _localMonitor;
+        // Монитор системных ресурсов
+        private readonly ServerMonitor _monitor;
 
+        /// <summary>
+        /// Конструктор класса TelegramBot
+        /// </summary>
+        /// <param name="token">Токен бота Telegram</param>
         public TelegramBot(string token)
         {
             _botClient = new TelegramBotClient(token);
-            _serverCredentials = new ConcurrentDictionary<long, ServerCredentials>();
-            _localMonitor = new ServerMonitor();
+            _monitor = new ServerMonitor();
         }
 
+        /// <summary>
+        /// Запуск бота с использованием long polling
+        /// </summary>
         public async Task StartAsync()
         {
             var cts = new CancellationTokenSource();
-
+            
+            // Настройка параметров получения обновлений
             var receiverOptions = new ReceiverOptions
             {
-                AllowedUpdates = { }
+                AllowedUpdates = Array.Empty<UpdateType>(), // Принимаем все типы обновлений
+                ThrowPendingUpdates = true // Пропускаем старые обновления при запуске
             };
 
+            // Запуск получения обновлений
             _botClient.StartReceiving(
-                HandleUpdateAsync,
-                HandleErrorAsync,
-                receiverOptions,
-                cancellationToken: cts.Token);
+                updateHandler: HandleUpdateAsync,
+                pollingErrorHandler: HandlePollingErrorAsync,
+                receiverOptions: receiverOptions,
+                cancellationToken: cts.Token
+            );
 
+            // Получение и вывод информации о боте
             var me = await _botClient.GetMeAsync();
-            Console.WriteLine($"Start listening for @{me.Username}");
+            Console.WriteLine($"Bot started successfully. @{me.Username}");
         }
 
+        /// <summary>
+        /// Обработчик входящих сообщений
+        /// </summary>
         private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
         {
             try
             {
-                if (update.Message is not { Text: { } messageText } message)
+                // Проверяем, что получили текстовое сообщение
+                if (update.Message is not { } message)
+                    return;
+                if (message.Text is not { } messageText)
                     return;
 
                 var chatId = message.Chat.Id;
+                Console.WriteLine($"Received message: {messageText}");
 
-                Console.WriteLine($"Received a '{messageText}' message in chat {chatId}.");
-
+                // Обработка команд, начинающихся с '/'
                 if (messageText.StartsWith("/"))
                 {
-                    await HandleCommand(message, cancellationToken);
+                    await HandleCommand(chatId, messageText, cancellationToken);
                 }
-                else if (_serverCredentials.TryGetValue(chatId, out var credentials) && credentials.AwaitingInput)
+                else
                 {
-                    await HandleCredentialsInput(message, credentials, cancellationToken);
+                    // Ответ на обычные сообщения
+                    await _botClient.SendTextMessageAsync(
+                        chatId: chatId,
+                        text: "Use /start to see available commands",
+                        cancellationToken: cancellationToken);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error handling message: {ex}");
+                Console.WriteLine($"Error handling update: {ex.Message}");
             }
         }
 
-        private async Task HandleCommand(Message message, CancellationToken cancellationToken)
+        /// <summary>
+        /// Обработчик команд бота
+        /// </summary>
+        private async Task HandleCommand(long chatId, string command, CancellationToken cancellationToken)
         {
-            var command = message.Text.Split(' ')[0].ToLower();
-            var chatId = message.Chat.Id;
-
-            switch (command)
+            switch (command.ToLower())
             {
                 case "/start":
-                    await SendWelcomeMessage(chatId, cancellationToken);
+                    // Отправка приветственного сообщения и списка команд
+                    await _botClient.SendTextMessageAsync(
+                        chatId: chatId,
+                        text: "Welcome to Server Monitor Bot!\n" +
+                              "Available commands:\n" +
+                              "/start - Show this help message\n" +
+                              "/status - Show server status",
+                        cancellationToken: cancellationToken);
                     break;
 
-                case "/local":
-                    await MonitorLocalSystem(chatId, cancellationToken);
-                    break;
-
-                case "/addserver":
-                    await InitiateServerAdd(chatId, cancellationToken);
-                    break;
-
-                case "/listservers":
-                    await ListServers(chatId, cancellationToken);
-                    break;
-
-                case "/monitor":
-                    if (_serverCredentials.TryGetValue(chatId, out var credentials))
-                    {
-                        await MonitorRemoteServer(chatId, credentials, cancellationToken);
-                    }
-                    else
-                    {
-                        await _botClient.SendTextMessageAsync(
-                            chatId,
-                            "No server configured. Use /addserver first.",
-                            cancellationToken: cancellationToken);
-                    }
-                    break;
-
-                case "/execute":
-                    if (message.Text.Split(' ').Length < 2)
-                    {
-                        await _botClient.SendTextMessageAsync(
-                            chatId,
-                            "Please provide a command to execute. Format: /execute <command>",
-                            cancellationToken: cancellationToken);
-                        return;
-                    }
-
-                    if (_serverCredentials.TryGetValue(chatId, out var creds))
-                    {
-                        var cmd = message.Text.Substring(message.Text.IndexOf(' ') + 1);
-                        await ExecuteRemoteCommand(chatId, creds, cmd, cancellationToken);
-                    }
-                    else
-                    {
-                        await _botClient.SendTextMessageAsync(
-                            chatId,
-                            "No server configured. Use /addserver first.",
-                            cancellationToken: cancellationToken);
-                    }
+                case "/status":
+                    // Получение и отправка информации о состоянии сервера
+                    var status = GetServerStatus();
+                    await _botClient.SendTextMessageAsync(
+                        chatId: chatId,
+                        text: status,
+                        cancellationToken: cancellationToken);
                     break;
 
                 default:
+                    // Ответ на неизвестную команду
                     await _botClient.SendTextMessageAsync(
-                        chatId,
-                        "Unknown command. Use /start to see available commands.",
+                        chatId: chatId,
+                        text: "Unknown command. Use /start to see available commands.",
                         cancellationToken: cancellationToken);
                     break;
             }
         }
 
-        private async Task SendWelcomeMessage(long chatId, CancellationToken cancellationToken)
+        /// <summary>
+        /// Получение информации о состоянии сервера
+        /// </summary>
+        private string GetServerStatus()
         {
-            var welcomeMessage = "Welcome to Server Monitor Bot!\n\n" +
-                               "Available commands:\n" +
-                               "/start - Show this message\n" +
-                               "/local - Monitor local system\n" +
-                               "/addserver - Add a remote server\n" +
-                               "/listservers - List configured servers\n" +
-                               "/monitor - Monitor remote server\n" +
-                               "/execute <command> - Execute command on remote server";
+            // Перенаправляем вывод консоли в строку
+            var output = new StringWriter();
+            var console = Console.Out;
+            Console.SetOut(output);
 
-            await _botClient.SendTextMessageAsync(
-                chatId,
-                welcomeMessage,
-                cancellationToken: cancellationToken);
+            // Получаем информацию о CPU и памяти
+            _monitor.MonitorCpuUsage();
+            _monitor.MonitorMemoryUsage();
+
+            // Восстанавливаем вывод консоли и возвращаем результат
+            Console.SetOut(console);
+            return output.ToString();
         }
 
-        private async Task MonitorLocalSystem(long chatId, CancellationToken cancellationToken)
+        /// <summary>
+        /// Обработчик ошибок при получении обновлений
+        /// </summary>
+        private Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
         {
-            try
+            var errorMessage = exception switch
             {
-                var output = new System.IO.StringWriter();
-                var console = Console.Out;
-                Console.SetOut(output);
-
-                _localMonitor.MonitorCpuUsage();
-                _localMonitor.MonitorMemoryUsage();
-
-                Console.SetOut(console);
-                await _botClient.SendTextMessageAsync(
-                    chatId,
-                    output.ToString(),
-                    cancellationToken: cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                await _botClient.SendTextMessageAsync(
-                    chatId,
-                    $"Error monitoring local system: {ex.Message}",
-                    cancellationToken: cancellationToken);
-            }
-        }
-
-        private async Task InitiateServerAdd(long chatId, CancellationToken cancellationToken)
-        {
-            var credentials = new ServerCredentials { AwaitingInput = true, InputStep = InputStep.Host };
-            _serverCredentials.AddOrUpdate(chatId, credentials, (_, _) => credentials);
-
-            await _botClient.SendTextMessageAsync(
-                chatId,
-                "Please enter the server host (IP address or domain):",
-                cancellationToken: cancellationToken);
-        }
-
-        private async Task HandleCredentialsInput(Message message, ServerCredentials credentials, CancellationToken cancellationToken)
-        {
-            var chatId = message.Chat.Id;
-            var input = message.Text;
-
-            switch (credentials.InputStep)
-            {
-                case InputStep.Host:
-                    credentials.Host = input;
-                    credentials.InputStep = InputStep.Username;
-                    await _botClient.SendTextMessageAsync(
-                        chatId,
-                        "Please enter the username:",
-                        cancellationToken: cancellationToken);
-                    break;
-
-                case InputStep.Username:
-                    credentials.Username = input;
-                    credentials.InputStep = InputStep.Password;
-                    await _botClient.SendTextMessageAsync(
-                        chatId,
-                        "Please enter the password:",
-                        cancellationToken: cancellationToken);
-                    break;
-
-                case InputStep.Password:
-                    credentials.Password = input;
-                    credentials.AwaitingInput = false;
-                    await _botClient.SendTextMessageAsync(
-                        chatId,
-                        "Server credentials saved! You can now use /monitor to monitor the server.",
-                        cancellationToken: cancellationToken);
-                    break;
-            }
-        }
-
-        private async Task ListServers(long chatId, CancellationToken cancellationToken)
-        {
-            if (_serverCredentials.TryGetValue(chatId, out var credentials) && !string.IsNullOrEmpty(credentials.Host))
-            {
-                await _botClient.SendTextMessageAsync(
-                    chatId,
-                    $"Configured server:\nHost: {credentials.Host}\nUsername: {credentials.Username}",
-                    cancellationToken: cancellationToken);
-            }
-            else
-            {
-                await _botClient.SendTextMessageAsync(
-                    chatId,
-                    "No servers configured. Use /addserver to add a server.",
-                    cancellationToken: cancellationToken);
-            }
-        }
-
-        private async Task MonitorRemoteServer(long chatId, ServerCredentials credentials, CancellationToken cancellationToken)
-        {
-            try
-            {
-                var remoteMonitor = new RemoteServerMonitor(credentials.Host, credentials.Username, credentials.Password);
-                
-                var output = new System.IO.StringWriter();
-                var console = Console.Out;
-                Console.SetOut(output);
-
-                remoteMonitor.MonitorRemoteServer();
-
-                Console.SetOut(console);
-                await _botClient.SendTextMessageAsync(
-                    chatId,
-                    output.ToString(),
-                    cancellationToken: cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                await _botClient.SendTextMessageAsync(
-                    chatId,
-                    $"Error monitoring remote server: {ex.Message}",
-                    cancellationToken: cancellationToken);
-            }
-        }
-
-        private async Task ExecuteRemoteCommand(long chatId, ServerCredentials credentials, string command, CancellationToken cancellationToken)
-        {
-            try
-            {
-                var remoteMonitor = new RemoteServerMonitor(credentials.Host, credentials.Username, credentials.Password);
-                
-                var output = new System.IO.StringWriter();
-                var console = Console.Out;
-                Console.SetOut(output);
-
-                remoteMonitor.ExecuteCommand(command);
-
-                Console.SetOut(console);
-                await _botClient.SendTextMessageAsync(
-                    chatId,
-                    output.ToString(),
-                    cancellationToken: cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                await _botClient.SendTextMessageAsync(
-                    chatId,
-                    $"Error executing command: {ex.Message}",
-                    cancellationToken: cancellationToken);
-            }
-        }
-
-        private Task HandleErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
-        {
-            var ErrorMessage = exception switch
-            {
-                ApiRequestException apiRequestException
-                    => $"Telegram API Error:\n[{apiRequestException.ErrorCode}]\n{apiRequestException.Message}",
+                ApiRequestException apiRequestException =>
+                    $"Telegram API Error:\n{apiRequestException.ErrorCode}\n{apiRequestException.Message}",
                 _ => exception.ToString()
             };
 
-            Console.WriteLine(ErrorMessage);
+            Console.WriteLine(errorMessage);
             return Task.CompletedTask;
         }
-    }
-
-    public class ServerCredentials
-    {
-        public string Host { get; set; }
-        public string Username { get; set; }
-        public string Password { get; set; }
-        public bool AwaitingInput { get; set; }
-        public InputStep InputStep { get; set; }
-    }
-
-    public enum InputStep
-    {
-        Host,
-        Username,
-        Password
     }
 }

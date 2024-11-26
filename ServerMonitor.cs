@@ -1,41 +1,60 @@
-using System;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
-using System.IO;
 
 namespace ServerActivityMonitor
 {
+    /// <summary>
+    /// Класс для мониторинга системных ресурсов
+    /// </summary>
     public class ServerMonitor
     {
-        private Process process = Process.GetCurrentProcess();
-
+        /// <summary>
+        /// Мониторинг использования CPU
+        /// </summary>
         public void MonitorCpuUsage()
         {
-            TimeSpan startCpuUsage = process.TotalProcessorTime;
-            var startTime = DateTime.Now;
-            
-            System.Threading.Thread.Sleep(1000); // Wait for 1 second
-            
-            TimeSpan endCpuUsage = process.TotalProcessorTime;
-            var endTime = DateTime.Now;
-
-            double cpuUsedMs = (endCpuUsage - startCpuUsage).TotalMilliseconds;
-            double totalMsPassed = (endTime - startTime).TotalMilliseconds;
-            double cpuUsageTotal = cpuUsedMs / (Environment.ProcessorCount * totalMsPassed) * 100;
-
-            Console.WriteLine($"CPU Usage: {cpuUsageTotal:F2}%");
+            try
+            {
+                // Создаем счетчик производительности для CPU
+                var cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
+                
+                // Получаем два значения с интервалом в 1 секунду для точного измерения
+                var firstValue = cpuCounter.NextValue();
+                System.Threading.Thread.Sleep(1000);
+                var secondValue = cpuCounter.NextValue();
+                
+                // Выводим результат
+                Console.WriteLine($"CPU Usage: {secondValue:0.00}%");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error monitoring CPU: {ex.Message}");
+            }
         }
 
+        /// <summary>
+        /// Мониторинг использования памяти
+        /// </summary>
         public void MonitorMemoryUsage()
         {
-            var currentProcess = Process.GetCurrentProcess();
-            var workingSet = currentProcess.WorkingSet64 / (1024 * 1024); // Convert to MB
-            var virtualMemorySize = currentProcess.VirtualMemorySize64 / (1024 * 1024); // Convert to MB
-            var privateMemorySize = currentProcess.PrivateMemorySize64 / (1024 * 1024); // Convert to MB
-
-            Console.WriteLine($"Process Working Set (Memory): {workingSet} MB");
-            Console.WriteLine($"Process Virtual Memory: {virtualMemorySize} MB");
-            Console.WriteLine($"Process Private Memory: {privateMemorySize} MB");
+            try
+            {
+                // Создаем счетчик для доступной памяти
+                var ramCounter = new PerformanceCounter("Memory", "Available MBytes");
+                var availableMemory = ramCounter.NextValue();
+                
+                // Получаем информацию о памяти текущего процесса
+                var process = Process.GetCurrentProcess();
+                var totalMemoryBytes = process.WorkingSet64;
+                var totalMemoryMB = totalMemoryBytes / (1024 * 1024);
+                
+                // Выводим результаты
+                Console.WriteLine($"Memory Usage: {totalMemoryMB} MB");
+                Console.WriteLine($"Available Memory: {availableMemory:0.00} MB");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error monitoring memory: {ex.Message}");
+            }
         }
     }
 }
